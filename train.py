@@ -9,7 +9,11 @@ import scipy.sparse as sp
 import torch
 from torch import optim
 
+import dgl
+from dgl.transform import add_self_loop
+
 from gae.model import GCNModelVAE
+from gae.gae_dgl import GVAE
 from gae.optimizer import loss_function
 from gae.utils import load_data, mask_test_edges, preprocess_graph, get_roc_score
 
@@ -43,34 +47,49 @@ def gae_for(args):
     adj_norm = preprocess_graph(adj)
     adj_label = adj_train + sp.eye(adj_train.shape[0])
     # adj_label = sparse_to_tuple(adj_label)
-    adj_label = torch.FloatTensor(adj_label.toarray())
+    # import pdb; pdb.set_trace()
+    adj_label = torch.FloatTensor(adj_label.toarray()).cuda()
 
-    pos_weight = float(adj.shape[0] * adj.shape[0] - adj.sum()) / adj.sum()
+    # pos_weight = float(adj.shape[0] * adj.shape[0] - adj.sum()) / adj.sum()
+    pos_weight = torch.Tensor([float(adj.shape[0] * adj.shape[0] - adj.sum()) / adj.sum()]).cuda()
+    print(f'pos_weight: {pos_weight.item()}')
     norm = adj.shape[0] * adj.shape[0] / float((adj.shape[0] * adj.shape[0] - adj.sum()) * 2)
 
-    model = GCNModelVAE(feat_dim, args.hidden1, args.hidden2, args.dropout)
+
+    # model = GCNModelVAE(feat_dim, args.hidden1, args.hidden2, dropout=args.dropout) #DGL
+
+    # === DGL ==== # 
+    g = dgl.DGLGraph(adj, readonly=True)
+    g = add_self_loop(g)
+    model = GVAE(g, feat_dim, args.hidden1, args.hidden2, dropout=args.dropout).cuda()
+    features = torch.Tensor(features).cuda()
+    # === DGL ==== # 
+
+    print(model)
+
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
     hidden_emb = None
     for epoch in range(args.epochs):
+
         t = time.time()
         model.train()
         optimizer.zero_grad()
-        recovered, mu, logvar = model(features, adj_norm)
-        loss = loss_function(preds=recovered, labels=adj_label,
-                             mu=mu, logvar=logvar, n_nodes=n_nodes,
-                             norm=norm, pos_weight=pos_weight)
+        # recovered, mu, logvar = model(features, adj_norm)
+        recovered, mu, logvar = model(features)
+        loss = loss_function(preds=recovered, labels=adj_label, mu=mu, logvar=logvar, n_nodes=n_nodes, norm=norm, pos_weight=pos_weight)
         loss.backward()
         cur_loss = loss.item()
         optimizer.step()
 
-        hidden_emb = mu.data.numpy()
-        roc_curr, ap_curr = get_roc_score(hidden_emb, adj_orig, val_edges, val_edges_false)
 
-        print("Epoch:", '%04d' % (epoch + 1), "train_loss=", "{:.5f}".format(cur_loss),
-              "val_ap=", "{:.5f}".format(ap_curr),
-              "time=", "{:.5f}".format(time.time() - t)
-              )
+        if epoch%10==0:
+            hidden_emb = mu.cpu().data.numpy()
+            roc_curr, ap_curr = get_roc_score(hidden_emb, adj_orig, val_edges, val_edges_false)
+            print("Epoch:", '%04d' % (epoch + 1), "train_loss=", "{:.5f}".format(cur_loss),
+                "val_ap=", "{:.5f}".format(ap_curr),
+                "time=", "{:.5f}".format(time.time() - t)
+                )
 
     print("Optimization Finished!")
 
